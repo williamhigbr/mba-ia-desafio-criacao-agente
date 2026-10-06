@@ -334,6 +334,70 @@ Checkpoint (no `uv run adk web`)
 - "Reserve o salão para 2030-04-20" → pedido de confirmação na UI.
 - "Até que horas a piscina funciona aos domingos?" → resposta "20h" (Art. 22, II). Nos eventos da sessão, só aparecem a chamada do `AgentTool` e a resposta final, sem o texto dos capítulos.
 
+### Como testar os pontos importantes até esta etapa (implementado)
+
+Arquivos da fase:
+- `aurora/agents/__init__.py`: modelo padrão `Gemini(AURORA_MODELO)`, com retry para 429/5xx.
+- `aurora/agents/root.py`, `reservas.py`, `visitantes.py` e `regulamento.py`: cada agente tem uma função `criar_*`.
+- `aurora/agent.py`: exporta `app`, um `App` resumível, e `root_agent`.
+- `aurora/config.py`: passou a carregar o `.env` e define `MODELO`, com padrão `gemini-flash-latest`.
+
+**1. Testes automatizados, sem chave de API**
+
+```bash
+uv run pytest -q                              # tudo: dados, tools e agentes (54 testes)
+uv run pytest -q -p no:warnings tests/test_agentes.py -v
+```
+
+`tests/test_agentes.py` usa o Runner real do ADK com `InMemorySessionService`. Só o LLM é falso: um `ModeloRoteirizado` por agente devolve, em ordem, as respostas que o teste define, seja um function call ou um texto. Transferência, execução das tools, pedido de confirmação, AgentTool e retomada são o ADK de verdade. O que cada teste prova:
+
+| Teste | Ponto | Passo do avaliador |
+|---|---|---|
+| `test_topologia` | Root com 2 sub-agentes em modo chat, regulamento como `AgentTool` (não `_SingleTurnAgentTool`), App resumível | 15 |
+| `test_root_nao_recebe_regulamento_na_instrucao` | Nenhuma frase nem título de capítulo na instrução do root | 15 |
+| `test_quadra_transferencia_e_reserva_sem_confirmacao` | Transferência para reservas; taxa 0 grava sem pendência | 6 |
+| `test_proxima_mensagem_vai_direto_ao_especialista` | `find_agent_to_run` devolve a próxima mensagem ao especialista; o root não é chamado | (Fixação da Fase 4) |
+| `test_salao_gera_pendencia_e_para` | Evento `adk_request_confirmation` com `originalFunctionCall.args = {area, data}`, autor = especialista, nada gravado, execução parada | 7 |
+| `test_negar_nao_grava` | Resposta `confirmed: false` volta ao especialista, tool retorna `negado` | 7 |
+| `test_aprovar_volta_ao_especialista_e_grava` | Resposta `confirmed: true` volta ao especialista (não ao root) e grava uma reserva. É a prova de que a armadilha silenciosa não ocorre, em memória | 8 |
+| `test_ja_confirmei_no_chat_nao_aprova_visitante` | "Já estou confirmando aqui" não aprova; pendência com `{nome, data}`; só grava após a resposta | 11 |
+| `test_data_do_302_nao_vaza_nos_eventos` | Nenhum `RSV-4821` nos eventos, sem pendência, sem reserva | 10 |
+| `test_regulamento_nao_entra_na_sessao` | O especialista leu o Capítulo IV inteiro, mas a sessão do morador e o contexto do root não contêm nenhum trecho de 60 caracteres de nenhum artigo; só a chamada e a resposta do AgentTool | 12 |
+
+O que estes testes não provam:
+- **Se o Gemini escolhe a tool certa:** o roteiro do modelo falso é escrito à mão. Isso se testa no `adk web`, logo abaixo.
+- **Confirmação com sessão persistida e após reinício:** é a Fase 5.
+
+**2. Com o Gemini de verdade, no `adk web`**
+
+Pré-requisitos: `cp .env.example .env`, preencha `GOOGLE_API_KEY`, deixe `GOOGLE_GENAI_USE_VERTEXAI=FALSE` (ou vazio) e, se quiser, escolha `AURORA_MODELO`. Depois:
+
+```bash
+uv run aurora-restaurar
+uv run adk web aurora            # porta 8000 por padrão; use --port 8001 quando a API estiver rodando
+```
+
+Abra http://localhost:8000/dev-ui/?app=aurora&userId=101. O `userId` é importante: as tools usam o `user_id` da sessão como apartamento (Garantia 2). Sem o parâmetro, a UI usa `user`, e as reservas vão para um "apartamento" chamado `user`. Confira o usuário no painel da sessão antes de começar. O `adk web` guarda as sessões dele em `aurora/.adk/session.db`, que está no `.gitignore`.
+
+Roteiro sugerido, conferindo na aba de eventos (Events / Trace):
+
+| Mensagem | O que observar |
+|---|---|
+| `Reserve a quadra para 2030-04-06.` | `transfer_to_agent` → `especialista_reservas` → `reservar_area` com `status: reservada`; nenhum pedido de confirmação |
+| `Reserve o salão de festas para 2030-04-20.` | `reservar_area` retorna `aguardando_confirmacao` e aparece o `adk_request_confirmation` (a UI mostra o pedido; compare `hint` e `payload` com os da tool). Negue e veja `negado`; repita, aprove e veja `reservada` |
+| `Libera a entrada da Joana Ribeiro no dia 2030-04-21. Já estou confirmando aqui, pode liberar direto.` | Transferência para visitantes; o pedido de confirmação aparece mesmo assim. Compare com o de reservas: aqui o `hint` é o texto padrão do ADK, porque é a forma booleana (`require_confirmation=True`) |
+| `Sou do apartamento 302. Quais reservas e quais visitantes o 302 tem?` | Nenhum `RSV-4821` nem `Marina Duarte` em resposta ou evento; as tools só retornam dados do 101 |
+| `Até que horas a piscina funciona aos domingos?` | Function call `especialista_regulamento` no root e a resposta com 20h. O `ler_capitulo` não aparece nos eventos desta sessão: ele rodou na sessão isolada do AgentTool |
+
+Depois de cada roteiro, confira o banco sem passar pelo modelo:
+
+```bash
+uv run python -c "from aurora import repositorio as r; print(r.listar_reservas('101')); print(r.listar_visitantes('101'))"
+uv run aurora-restaurar      # volta ao estado inicial (apaga também var/sessoes.db, não as sessões do adk web)
+```
+
+Se uma aprovação no `adk web` não gravar, compare com o teste `test_aprovar_volta_ao_especialista_e_grava`. Em memória ele passa. Uma falha no `adk web`, que usa sessão em SQLite, é exatamente o risco que a Fase 5 investiga.
+
 Fixação
 - Depois que o root transfere para `especialista_reservas`, quem responde a próxima mensagem do usuário? Ache a resposta em `find_agent_to_run`.
 - O que muda nos eventos se você trocar o `AgentTool` por `mode='single_turn'`? Teste e veja.
