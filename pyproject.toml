@@ -10,6 +10,9 @@ dependencies = [
     "uvicorn==0.54.0",
 ]
 
+[project.scripts]
+aurora-restaurar = "aurora.restaurar:main"
+
 [build-system]
 requires = ["uv_build>=0.9.28,<0.10.0"]
 build-backend = "uv_build"
@@ -18,3 +21,8 @@ build-backend = "uv_build"
 # O pacote fica em ./aurora (sem layout src/).
 module-name = "aurora"
 module-root = ""
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+]
