@@ -266,6 +266,50 @@ Pontos para entender (e explicar no README):
 Checkpoint
 - Testes manuais das funções com um `ToolContext` falso (ou direto no `adk web` na fase 4).
 
+### Como testar as tools desta fase (implementado)
+
+Arquivos: `aurora/tools/_contexto.py` (apartamento da sessão), `aurora/tools/reservas.py`, `aurora/tools/visitantes.py` (o `FunctionTool(..., require_confirmation=True)` mora aqui, junto da função, e não em `agents/visitantes.py`), `aurora/tools/regulamento.py` e `aurora/regulamento.py` (parser dos capítulos). Cada módulo exporta uma lista `TOOLS` para os agentes da Fase 4.
+
+1. Testes automatizados, sem LLM e sem chave de API:
+
+   ```bash
+   uv run pytest -q                          # tudo (dados + tools)
+   uv run pytest -q tests/test_tools.py -v   # só as tools, com o nome de cada cenário
+   uv run pytest -q -k confirmacao           # filtra por palavra no nome do teste
+   ```
+
+   Cada teste roda num banco temporário restaurado de `dados/`, então não toca em `var/`. As tools são executadas por `FunctionTool.run_async`, o mesmo caminho do ADK quando o modelo faz um function call. Só o `ToolContext` é falso (`FakeToolContext` em `tests/test_tools.py`): ele fornece `user_id` e `function_call_id` como a sessão faria, e `tool_confirmation` como o ADK preenche na reexecução depois de uma resposta pela rota de confirmações. Os cenários seguem os passos do avaliador: 4 (cancelar a do 302), 5, 6, 7 (pedir e negar), 8 (aprovar e reexecutar sem duplicar), 10 (data do 302 sem vazar dono), 11 (visitante), 14 (duas aprovações simultâneas). Há também um teste que lê a declaração de cada tool (o que o modelo enxerga) e falha se algum parâmetro tiver `apartamento`.
+
+2. Exploração interativa, para ver os retornos com os seus próprios olhos (usa `var/condominio.db`; rode `uv run aurora-restaurar` antes e depois):
+
+   ```bash
+   uv run python -W ignore
+   ```
+
+   ```python
+   import asyncio
+   from google.adk.tools import FunctionTool
+   from google.adk.tools.tool_confirmation import ToolConfirmation
+   from tests.test_tools import FakeToolContext
+   from aurora.tools import reservas, visitantes, regulamento
+
+   rodar = lambda tool, ctx, **args: asyncio.run(
+       (tool if isinstance(tool, FunctionTool) else FunctionTool(tool)).run_async(args=args, tool_context=ctx))
+
+   ctx = FakeToolContext(user_id="101", function_call_id="fc-1")
+   rodar(reservas.reservar_area, ctx, area="salao-de-festas", data="2030-04-20")   # aguardando_confirmacao
+   ctx.actions.requested_tool_confirmations                                        # o pedido que vira adk_request_confirmation
+
+   ctx.tool_confirmation = ToolConfirmation(confirmed=True)                       # simula a aprovação
+   rodar(reservas.reservar_area, ctx, area="salao-de-festas", data="2030-04-20")   # reservada
+   rodar(reservas.reservar_area, FakeToolContext(), area="salao-de-festas", data="2030-03-16")  # indisponivel, sem dono
+   rodar(regulamento.ler_capitulo, FakeToolContext(), numero=4)["texto"][:300]
+   ```
+
+3. Com o LLM de verdade, no `uv run adk web`: depende dos agentes da Fase 4. Os roteiros estão no checkpoint daquela fase.
+
+O que os testes desta fase não cobrem, de propósito: o ciclo real de confirmação do ADK (evento `adk_request_confirmation`, roteamento da resposta ao agente certo, sessão persistida). Isso é a Fase 5.
+
 Fixação
 - Se o modelo chamar `reservar_area` com uma área de taxa 150 e o morador nunca responder pela rota, o que fica gravado no banco? E na sessão?
 - Por que nenhuma tool pode ter parâmetro `apartamento`, mesmo validado?
@@ -454,7 +498,7 @@ Garantias, uma subseção por garantia, cada uma com arquivo, função/trecho e 
 
 | Garantia | Onde (exemplo) | Por que não depende do modelo |
 |---|---|---|
-| 1. Confirmação | `aurora/tools/reservas.py::reservar_area` (`request_confirmation` quando `taxa > 0`), `aurora/agents/visitantes.py` (`require_confirmation=True`), `aurora/api/confirmacoes.py` (pendências + 409) | A tool só grava com `tool_confirmation.confirmed`, que só existe via rota de confirmações |
+| 1. Confirmação | `aurora/tools/reservas.py::reservar_area` (`request_confirmation` quando `taxa > 0`), `aurora/tools/visitantes.py` (`require_confirmation=True`), `aurora/api/confirmacoes.py` (pendências + 409) | A tool só grava com `tool_confirmation.confirmed`, que só existe via rota de confirmações |
 | 2. Apartamento da sessão | `aurora/tools/*.py` (`tool_context.user_id`), `aurora/api/main.py::criar_sessao` | Nenhuma tool aceita apartamento; todas as queries filtram pelo da sessão |
 | 3. Persistência | `aurora/api/main.py` (lifespan com `SqliteSessionService`), `aurora/db.py` | Sessões e dados em arquivo; pendências derivadas dos eventos |
 | 4. Regulamento | `aurora/agents/root.py` (`AgentTool`), `aurora/agents/regulamento.py` | Leitura acontece em sessão isolada do `AgentTool`; root não recebe o texto |
