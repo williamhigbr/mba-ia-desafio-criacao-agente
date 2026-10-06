@@ -492,3 +492,97 @@ Como rodar
 - Limite de requisições do Gemini estourando no meio do roteiro.
 - Reserva do passo 10 (data ocupada pelo 302): a resposta não pode citar "302". Seu retorno de tool não deve dar ao modelo nenhum dado para isso.
 - Mudanças em `dados/` (o passo 15 compara com o repositório base).
+
+---
+
+## Respostas das perguntas de fixação
+
+Tente responder sozinho antes de ler. As referências de código são do ADK 2.11.0 instalado em `.venv/lib/python3.12/site-packages/google/adk/` e da camada de dados já implementada em `aurora/`.
+
+### Fase 0
+
+**`google-adk>=2.2` vs `google-adk==2.11.0`.** Com `>=`, o avaliador pode instalar uma versão mais nova que a sua, com outro comportamento de roteamento ou de confirmação. O enunciado relata justamente que esse comportamento mudou entre versões. Com `==`, todos rodam o mesmo ADK que você testou. O critério de aceite exige a versão exata.
+
+**Por que versionar o `uv.lock`.** O `pyproject.toml` fixa só as dependências diretas. O ADK puxa dezenas de dependências transitivas (google-genai, opentelemetry, sqlalchemy, pydantic...), e qualquer uma delas pode mudar. O lock registra a versão exata e o hash de todas, então o `uv sync` do avaliador reproduz o seu ambiente de verdade. Foi o que vimos na Fase 0: o FastAPI mais novo já não era compatível com o opentelemetry exigido pelo ADK.
+
+### Fase 1
+
+**`Event`, `author`, `invocation_id` e `branch`.**
+- **`Event`** (`events/event.py`): é a unidade gravada na sessão. Pode ser uma mensagem do usuário, um texto do modelo, um function call, um function response ou uma mudança de estado (`actions.state_delta`, `transfer_to_agent`, `requested_tool_confirmations`...).
+- **`author`**: quem produziu o evento, `"user"` ou o `name` do agente. É ele que o Runner usa para decidir quem retoma a conversa.
+- **`invocation_id`**: agrupa todos os eventos gerados a partir de uma mesma entrada do usuário, que é uma execução do `run_async`. Retomar uma invocação significa continuar esse grupo, em vez de abrir um novo.
+- **`branch`**: o caminho do agente na árvore, por exemplo `assistente_aurora.especialista_reservas`. Serve para isolar o histórico: um agente lê só os eventos do próprio branch (`_get_events(current_branch=True)`).
+
+**`transfer_to_agent` vs `AgentTool`.** Com transferência, o sub-agente roda na mesma sessão, e todos os eventos dele (chamadas de tool e retornos) ficam gravados nela e aparecem em `GET /eventos`. Com `AgentTool`, o agente roda num Runner aninhado com `InMemorySessionService()` próprio (`tools/agent_tool.py`, perto da linha 269). Os eventos internos ficam nessa sessão descartável, e a sessão principal recebe só o function call do `AgentTool` e o function response com o texto final. Cuidado: um `state_delta` do agente interno é repassado para o state da sessão principal (linha ~339).
+
+**`tool_context.tool_confirmation` na primeira execução e na reexecução.** Na primeira execução é `None`. A tool chama `request_confirmation(...)`, e o ADK grava o pedido em `actions.requested_tool_confirmations` e gera o evento `adk_request_confirmation`. Na reexecução, depois da resposta, é um `ToolConfirmation(hint, confirmed, payload)` montado a partir do `response` que o cliente enviou (`_parse_tool_confirmation`). Isso quer dizer que `confirmed` e `payload` vêm do cliente, não do pedido original. Por isso a tool decide pelos `args`, que o ADK confere contra o histórico, e usa de `tool_confirmation` só o `confirmed`.
+
+### Fase 2
+
+**Por que "SELECT, depois INSERT" não basta.**
+
+```
+t0  A: SELECT livre? -> sim
+t1  B: SELECT livre? -> sim      (A ainda não gravou)
+t2  A: INSERT -> ok
+t3  B: INSERT -> ok              duas reservas ativas para a mesma área e data
+```
+
+A conferência e a gravação são duas operações, e entre elas a outra requisição pode entrar. A exclusividade tem que ser uma propriedade da gravação. Com o índice único, o INSERT de B em t3 recebe `IntegrityError`, que vira `DataOcupada`. O `BEGIN IMMEDIATE` ainda serializa as duas transações de escrita, e o `busy_timeout` faz B esperar em vez de falhar com "database is locked".
+
+**Por que o índice é parcial.** Reservas canceladas continuam na tabela, para que o código nunca seja reaproveitado (regra 5). Um índice único em `(area, data)` sem filtro impediria reservar de novo uma data cuja reserva foi cancelada. Com `WHERE status = 'ativa'`, só reservas ativas disputam a vaga. O teste `test_cancelar_libera_data_mas_nao_o_codigo` cobre esse caso.
+
+### Fase 3
+
+**Reserva de taxa 150 sem resposta pela rota.** No banco não fica nada: a tool retornou antes do `criar_reserva`. Na sessão ficam:
+1. o function call `reservar_area` feito pelo modelo;
+2. o function response da tool (`{"status": "aguardando_confirmacao"}`), com `requested_tool_confirmations` nas `actions`;
+3. o function call `adk_request_confirmation` (com `originalFunctionCall` e `toolConfirmation`), marcado como long-running.
+
+Como esse pedido nunca recebe function response, ele continua aparecendo em `confirmacoes_pendentes` até alguém responder. Uma mensagem de texto do morador não o resolve.
+
+**Por que nenhuma tool tem parâmetro `apartamento`, mesmo validado.**
+- **Não há o que validar contra:** o único valor permitido é o da sessão. Um parâmetro que só aceita esse valor é inútil, e um parâmetro que aceita outro valor é a vulnerabilidade.
+- **Superfície de ataque:** um parâmetro desses convida o modelo a preenchê-lo com o que o morador disse ("sou do 302"). Basta um caminho de código que esqueça a validação para vazar dados de outro apartamento.
+- **Retornos:** mesmo com a validação certa, a recusa pode revelar informação ("o 302 não é seu" confirma que o 302 existe e tem algo).
+
+Sem o parâmetro, o modelo não tem nem como tentar. O critério do passo 15 é exatamente esse.
+
+### Fase 4
+
+**Quem responde depois da transferência.** O `especialista_reservas`. Em `find_agent_to_run` (`agents/_agent_router.py`), como a nova mensagem é texto e não function response, a primeira regra não se aplica. A função percorre os eventos de trás para frente, ignorando os do usuário, e encontra o último agente que falou. Ela o devolve se ele puder transferir até o root (`is_transferable_across_agent_tree`). Se o especialista tiver `disallow_transfer_to_parent=True`, a checagem falha e a mensagem vai para o root. Por isso o especialista precisa poder devolver ao root (`transfer_to_agent`) quando o assunto muda, por exemplo para visitantes.
+
+**`AgentTool` vs `mode='single_turn'`.** O `_SingleTurnAgentTool` roda o agente com `tool_context.run_node(...)` num sub-branch (`<agente>@<function_call_id>`) da mesma sessão. Os eventos internos, inclusive os retornos de `ler_capitulo` com o texto dos capítulos, ficam gravados na sessão principal e aparecem em `GET /eventos`. Isso quebra a Garantia 4 sempre que o especialista ler um capítulo além do necessário. Com `AgentTool`, eles ficam na sessão em memória descartável.
+
+### Fase 5
+
+**Por que funciona em memória e falha com sessão persistida.** Na retomada, o Runner reconstrói o contexto a partir dos eventos:
+- qual agente roda (`find_agent_to_run`, pelo `author`);
+- em qual branch (`_restore_branch_from_history`, pelo `branch` e pelo `node_info.path`);
+- quais agentes já terminaram (`populate_invocation_agent_states`, `end_of_agent`/`agent_state`).
+
+Com `InMemorySessionService`, os eventos são os próprios objetos Python que o Runner criou, sem perda nenhuma. Com sessão persistida, eles são serializados e desserializados. Qualquer campo que não volte idêntico, ou um serviço que não grave algum campo (é o caso dos serviços que a doc diz não suportar), muda essa reconstrução. Aí o processador de confirmação roda no agente errado ou não vê a resposta no branch, e retorna sem fazer nada, sem erro. Os detalhes estão na explicação da armadilha silenciosa, na Fase 1.
+
+### Fase 6
+
+**O que impede S1 de aprovar uma confirmação da S2.** As pendências são calculadas a partir dos eventos da sessão do caminho (`/sessoes/{S1}/...`). O id de S2 não está entre os pedidos de S1, então a API responde 409 sem chamar o Runner. Mesmo que chamasse, o Runner de S1 não acharia o function call (`_resolve_invocation_id_from_fr` lança `ValueError`). E as tools usam o apartamento da sessão em que rodam, nunca o da sessão de onde veio o id. Saber o `session_id` de outro morador está fora do escopo (autenticação).
+
+**Por que o 409 é decidido antes do Runner.**
+- O contrato exige que nada seja executado para um id que não está pendente. Isso tem que valer de forma determinística, sem depender da lógica interna de deduplicação do ADK, que pode mudar entre versões.
+- Um id desconhecido viraria `ValueError` dentro do Runner, ou seja, 500 em vez de 409.
+- Um id já respondido poderia retomar a invocação e reexecutar a tool. A `chave_idempotencia` evitaria a reserva duplicada, mas é uma segunda linha de defesa, não a regra.
+- Também evita uma chamada ao modelo.
+
+### Fase 7
+
+**Custo do regulamento no histórico.** `dados/regulamento.md` tem cerca de 6.500 palavras. Em português, isso dá algo como 9 a 11 mil tokens (cerca de 1,5 token por palavra; confira com `count_tokens` da API se quiser o número exato). Se o texto entrasse no histórico, ele seria reenviado em toda chamada ao modelo dali em diante, não só em toda mensagem. Uma mensagem com transferência para um especialista faz duas ou mais chamadas, todas com o histórico. Nas dezenas de chamadas do roteiro do avaliador, seriam centenas de milhares de tokens de entrada desperdiçados, além de mais latência e mais risco de estourar os limites por minuto do AI Studio.
+
+### Fase 8
+
+**Onde está a exclusividade, em uma linha.** No índice do schema em `aurora/db.py`:
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS ux_reserva_ativa ON reservas (area, data) WHERE status = 'ativa'
+```
+
+Ele é aplicado pelo `INSERT INTO reservas ...` de `criar_reserva` em `aurora/repositorio.py`. Esse INSERT é o instante em que o banco aceita ou recusa, e o `except sqlite3.IntegrityError` logo abaixo transforma a recusa em `DataOcupada`, uma resposta normal. O `data_livre` que a tool consulta antes é só para a experiência do morador e não garante nada. O teste `test_indice_unico_vale_mesmo_sem_o_repositorio` mostra que até um INSERT direto, fora do repositório, é recusado.
