@@ -580,6 +580,17 @@ Depois, faça o passo 1 de verdade: clone limpo do fork em outra pasta, `cp .env
 
 Rode o roteiro várias vezes variando a redação das mensagens, como o avaliador fará. LLM é não determinístico: uma garantia que passa 4 de 5 vezes não é uma garantia. Se um passo falha às vezes, a correção vai para o código (tool, validação, retorno), não para o prompt.
 
+### Como rodar o ensaio (implementado)
+
+`scripts/roteiro_avaliador.py` restaura os dados, sobe a API, faz os passos 1 a 14 e no passo 13 para a API com SIGINT (o Ctrl+C) e sobe de novo sem restaurar. A porta 8000 precisa estar livre, e o log da API vai para `var/roteiro_api.log`.
+
+```bash
+uv run python scripts/roteiro_avaliador.py --variante 0   # redação do enunciado
+uv run python scripts/roteiro_avaliador.py --todas        # variantes 0, 1 e 2 (inclui injeção e "sou o síndico")
+```
+
+Quando o assistente faz uma pergunta, o script responde, como o avaliador faria. No passo 10, ele aprova se aparecer uma pendência.
+
 ---
 
 ## Fase 10: README final (substitui o enunciado)
