@@ -156,7 +156,21 @@ def criar_api(criar_app_adk: Callable[[], App] = _app_adk_padrao) -> FastAPI:
 app = criar_api()
 
 
+def _chave_configurada() -> bool:
+    import os
+
+    vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in ("1", "true", "yes")
+    return vertex or bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"))
+
+
 def main() -> None:
+    import sys
+
     import uvicorn
+
+    # Sem chave, toda mensagem falharia dentro do cliente do Gemini. Melhor
+    # avisar na subida do que responder 500 na primeira conversa.
+    if not _chave_configurada():
+        sys.exit("GOOGLE_API_KEY não definida. Copie .env.example para .env e preencha a chave.")
 
     uvicorn.run("aurora.api.main:app", host="127.0.0.1", port=8000)
