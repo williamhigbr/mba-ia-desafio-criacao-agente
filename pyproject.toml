@@ -1,0 +1,31 @@
+[project]
+name = "aurora"
+version = "0.1.0"
+description = "Assistente virtual do Residencial Aurora, construído com Google ADK e exposto por uma API FastAPI."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.141.1",
+    "google-adk==2.11.0",
+    "python-dotenv==1.2.4",
+    "uvicorn==0.54.0",
+]
+
+[project.scripts]
+aurora-restaurar = "aurora.restaurar:main"
+aurora-api = "aurora.api.main:main"
+
+[build-system]
+requires = ["uv_build>=0.9.28,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# O pacote fica em ./aurora (sem layout src/).
+module-name = "aurora"
+module-root = ""
+
+[dependency-groups]
+dev = [
+    "httpx==0.28.1",
+    "pytest==9.1.1",
+]

@@ -1,3 +1,16 @@
 .env
 .venv/
 __pycache__/
+
+# Bancos SQLite locais (sessões do ADK e dados do condomínio)
+var/
+*.db
+*.db-wal
+*.db-shm
+
+# IDE
+.idea/
+
+# adk web (sessões locais) e macOS
+.adk/
+.DS_Store
