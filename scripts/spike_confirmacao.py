@@ -194,7 +194,7 @@ async def pedir(args) -> int:
 
     runner = _runner(args, "pedir")
     sessao = await runner.session_service.create_session(
-        app_name=config.APP_NAME, user_id=USUARIO, state={"apartamento": USUARIO}
+        app_name=config.APP_NAME, user_id=USUARIO
     )
     texto_msg = f"Reserve o salão de festas para {args.data}."
     print(f"[processo 1] serviço={args.servico} modelo={args.modelo} sessão={sessao.id}")

@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 aurora-restaurar = "aurora.restaurar:main"
+aurora-api = "aurora.api.main:main"
 
 [build-system]
 requires = ["uv_build>=0.9.28,<0.10.0"]
@@ -25,5 +26,6 @@ module-root = ""
 
 [dependency-groups]
 dev = [
+    "httpx==0.28.1",
     "pytest==9.1.1",
 ]

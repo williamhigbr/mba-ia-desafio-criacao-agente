@@ -199,7 +199,7 @@ Conceitos
 
 Garantia 2: de onde vem o apartamento
 - Nenhuma tool tem parâmetro `apartamento`. O modelo não tem como escolher um.
-- Na criação da sessão, use `user_id = apartamento` e grave também `state={"apartamento": "101"}`. Nas tools, leia de `tool_context.user_id` (ou do state). Prefira `user_id`: ele faz parte da identidade da sessão e não muda; o state, em tese, pode ser alterado por tools ou `output_key`, então nenhuma tool sua deve escrever essa chave.
+- Na criação da sessão, use `user_id = apartamento`, e só isso. Nas tools, leia de `tool_context.user_id`. Ele faz parte da identidade da sessão e não muda. O apartamento não é copiado para o state, de propósito: o state pode ser alterado por tools, `output_key` e pelo `state_delta` repassado pelo `AgentTool`, e uma segunda fonte convidaria alguém a ler a menos confiável.
 - Retornos nunca carregam dados de outro apartamento: `consultar_disponibilidade` devolve `{"area": ..., "data": ..., "livre": false}`, sem dono nem código. `cancelar_reserva` que não encontra nada no apartamento da sessão devolve "não encontrei essa reserva entre as suas", sem confirmar se ela existe para outro (passo 4). Reserva em data ocupada devolve "data indisponível" (passo 10).
 
 Tools sugeridas
@@ -449,7 +449,7 @@ Conceitos
 Rotas e regras
 
 `POST /sessoes` → 201 `{"session_id"}`
-- `session_service.create_session(app_name=APP, user_id=apartamento, state={"apartamento": apartamento})`.
+- `session_service.create_session(app_name=APP, user_id=apartamento)`, sem copiar o apartamento para o state (veja a Fase 3).
 - Grava `session_id → apartamento` na tabela `sessoes` (as rotas recebem só o `session_id` e o `get_session` exige `user_id`).
 
 `POST /sessoes/{id}/mensagens` → 200
@@ -500,6 +500,37 @@ Checkpoint
 Fixação
 - O que impede um morador da sessão S1 de aprovar uma confirmação da S2 enviando o id dela?
 - Por que o 409 é decidido antes de chamar o Runner?
+
+### Como testar (implementado)
+
+Arquivos:
+- `aurora/api/main.py`: rotas, lifespan com `SqliteSessionService` em `var/sessoes.db`, uma trava por sessão e erro do Gemini convertido em 503.
+- `aurora/api/confirmacoes.py`: pendências derivadas dos eventos.
+- `aurora/api/execucao.py`: Runner e montagem da resposta.
+- Comando de subida: `uv run aurora-api` (http://localhost:8000).
+
+Em `detalhes` vão os argumentos da tool, mais o `payload` que ela anexou. Na reserva, por exemplo, isso inclui a `taxa`.
+
+**1. Testes automatizados, sem chave:** `uv run pytest -q -p no:warnings tests/test_api.py -v`. Eles usam a API real com SQLite temporário e o modelo roteirizado, e cobrem:
+- passos 1, 3, 4, 6, 7, 8, 9, 11 e 13 do avaliador;
+- o passo 14 com duas aprovações disparadas em paralelo;
+- uma confirmação de outra sessão (409);
+- `GET /eventos` sem efeito colateral;
+- a aprovação de uma pendência criada antes do reinício.
+
+**2. Servidor real com Gemini e curl.** Se o `adk web` estiver ocupando a porta 8000, pare-o ou suba a API com `uv run uvicorn aurora.api.main:app --port 8011`.
+
+```bash
+uv run aurora-restaurar && uv run aurora-api          # terminal 1
+B=http://localhost:8000; J='Content-Type: application/json'   # terminal 2
+S1=$(curl -s -X POST $B/sessoes -H "$J" -d '{"apartamento":"101"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["session_id"])')
+curl -s -X POST $B/sessoes/$S1/mensagens -H "$J" -d '{"texto":"Reserve o salão de festas para 2030-04-20."}'
+# copie o id de confirmacoes_pendentes para C=...; Ctrl+C no terminal 1 e suba de novo
+curl -s $B/sessoes/$S1/eventos | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))'   # mesma contagem
+curl -s -X POST $B/sessoes/$S1/confirmacoes -H "$J" -d "{\"id\":\"$C\",\"confirmado\":true}"     # 200, reserva feita
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $B/sessoes/$S1/confirmacoes -H "$J" -d "{\"id\":\"$C\",\"confirmado\":true}"   # 409
+curl -s $B/apartamentos/101/reservas
+```
 
 ---
 
