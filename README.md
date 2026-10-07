@@ -41,8 +41,8 @@ Todas as leituras e gravações de reservas e visitantes passam por tools (`auro
 
 ### Escolhas
 
-- **Modelo:** Gemini, via Google AI Studio, configurável em `AURORA_MODELO`. O padrão é `gemini-flash-latest`, o mesmo para todos os agentes, porque o trabalho de cada um é roteamento ou chamada de tool, não raciocínio longo. O cliente tenta de novo com backoff em 429 e 5xx (`aurora/agents/__init__.py`).
-- **Armazenamento:** SQLite em arquivo, sem nenhum serviço externo. Usa dois bancos (`var/sessoes.db` para o ADK e `var/condominio.db` para os dados do condomínio), para que as escritas de um não disputem o lock do outro. Os arquivos de `dados/` são só lidos, pela restauração e pelo catálogo de áreas.
+- **Modelo:** Gemini, via Google AI Studio, configurável em `AURORA_MODELO`. O padrão é `gemini-flash-latest`, o mesmo para todos os agentes, porque o trabalho de cada um é roteamento ou chamada de tool, não raciocínio longo. O cliente tenta de novo com backoff em 429, 500, 502, 503 e 504 (`aurora/agents/__init__.py`).
+- **Armazenamento:** SQLite em arquivo, sem nenhum serviço externo. Usa dois bancos (`var/sessoes.db` para o ADK e `var/condominio.db` para os dados do condomínio), para que as escritas de um não disputem o lock do outro. Os arquivos de `dados/` são só lidos, pela restauração, pelo catálogo de áreas e pelo leitor de capítulos do regulamento.
 - **Pendências de confirmação:** derivadas dos eventos persistidos da sessão (`aurora/api/confirmacoes.py`), sem nenhum estado paralelo.
 
 ## Garantias
@@ -91,7 +91,7 @@ Todas as leituras e gravações de reservas e visitantes passam por tools (`auro
 
 ### 4. O regulamento é consultado, não carregado
 
-- **Root sem regulamento** (`aurora/agents/root.py`, `INSTRUCAO`): a instrução não contém o texto do regulamento nem os títulos dos capítulos. O root só sabe que existe a ferramenta `especialista_regulamento`.
+- **Root sem regulamento** (`aurora/agents/root.py`, `INSTRUCAO`): a instrução não contém o texto do regulamento nem os títulos dos capítulos. O root só conhece a ferramenta `especialista_regulamento` e a descrição curta dela, uma lista de temas, sem nenhum texto do regulamento.
 - **Leitura isolada** (`aurora/agents/root.py`, `tools=[AgentTool(agent=criar_especialista_regulamento(modelo_para))]`): o `AgentTool` roda o especialista em uma sessão em memória própria. As chamadas a `ler_capitulo` e o texto retornado ficam nessa sessão. A sessão do morador recebe só o function call `especialista_regulamento` com a pergunta e a resposta curta.
 - **Um capítulo por vez** (`aurora/agents/regulamento.py` e `aurora/tools/regulamento.py`, `ler_capitulo`): o especialista conhece só os títulos dos capítulos e lê o do assunto. O parser fica em `aurora/regulamento.py`.
 
